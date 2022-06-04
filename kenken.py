@@ -266,3 +266,265 @@ def gdomains(size, cliques):
 
     return domains
 
+
+
+def gneighbors(cliques):
+    """
+    Determine the neighbors of each variable for the given puzzle
+        For every clique in cliques
+        * Initialize its neighborhood as empty
+        * For every clique in cliques other than the clique at hand,
+            if they are probable to 'conflict' they are considered neighbors
+    """
+    neighbors = {}
+    for members, _, _ in cliques:
+        neighbors[members] = []
+
+    for A, _, _ in cliques:
+        for B, _, _ in cliques:
+            if A != B and B not in neighbors[A]:
+                if conflicting(A, [-1] * len(A), B, [-1] * len(B)):
+                    neighbors[A].append(B)
+                    neighbors[B].append(A)
+
+    return neighbors
+
+
+class Kenken(csp.CSP):
+
+    def __init__(self, size, cliques):
+        """
+        In my implementation, I consider the cliques themselves as variables.
+        A clique is of the format (((X1, Y1), ..., (XN, YN)), <operation>, <target>)
+        where
+            * (X1, Y1), ..., (XN, YN) are the members of the clique
+            * <operation> is either addition, subtraction, division or multiplication
+            * <target> is the value that the <operation> should produce
+              when applied on the members of the clique
+        """
+        validate(size, cliques)
+
+        variables = [members for members, _, _ in cliques]
+
+        domains = gdomains(size, cliques)
+
+        neighbors = gneighbors(cliques)
+
+        csp.CSP.__init__(self, variables, domains, neighbors, self.constraint)
+
+        self.size = size
+
+        # Used in benchmarking
+        self.checks = 0
+
+        # Used in displaying
+        self.padding = 0
+
+        self.meta = {}
+        for members, operator, target in cliques:
+            self.meta[members] = (operator, target)
+            self.padding = max(self.padding, len(str(target)))
+
+    def constraint(self, A, a, B, b):
+        """
+        Any two variables satisfy the constraint if they are the same
+        or they are not 'conflicting' i.e. every member of variable A
+        which shares the same row or column with a member of variable B
+        must not have the same value assigned to it
+        """
+        self.checks += 1
+
+        return A == B or not conflicting(A, a, B, b)
+
+    def display(self, assignment):
+        """
+        Print the kenken puzzle in a format easily readable by a human
+        """
+        if assignment:
+            atomic = {}
+            for members in self.variables:
+                values = assignment.get(members)
+
+                if values:
+                    for i in range(len(members)):
+                        atomic[members[i]] = values[i]
+                else:
+                    for member in members:
+                        atomic[member] = None
+        else:
+            atomic = {member: None for members in self.variables for member in members}
+
+        atomic = sorted(atomic.items(), key=lambda item: item[0][1] * self.size + item[0][0])
+
+        padding = lambda c, offset: (c * (self.padding + 2 - offset))
+
+        embrace = lambda inner, beg, end: beg + inner + end
+
+        mentioned = set()
+
+        def meta(member):
+            for var, val in self.meta.items():
+                if member in var and var not in mentioned:
+                    mentioned.add(var)
+                    return str(val[1]) + " " + (val[0] if val[0] != "." else " ")
+
+            return ""
+
+        fit = lambda word: padding(" ", len(word)) + word + padding(" ", 0)
+
+        cpadding = embrace(2 * padding(" ", 0), "|", "") * self.size + "|"
+        output = []
+
+        # def show(row,index):
+        #     output.append([])
+        #     for i,item in enumerate(row):
+        #         output[index].append(fit(meta(item[0])))
+        #         if item[1]:
+        #             output[index][i]=output[index][i]+fit(str(item[1]))
+        #
+        #     rpadding = "".join(["|" + fit(meta(item[0])) for item in row]) + "|"
+        #
+        #     data = "".join(["|" + fit(str(item[1] if item[1] else "")) for item in row]) + "|"
+        #
+        #     print(rpadding, data, cpadding, sep="\n")
+        def show(row, index):
+            output.append([])
+            test = []
+            for i, item in enumerate(row):
+                c = fit(meta(item[0]))
+
+                output[index].append(c.strip(" "))
+                test.append(c)
+                if item[1]:
+                    if output[index][i] != "":
+                        output[index][i] = "(" + output[index][i] + ")" + "     " + fit(str(item[1])).strip(" ")
+                    else:
+                        output[index][i] = fit(str(item[1])).strip(" ")
+            rpadding = "".join(["|" + item for item in test]) + "|"
+
+            data = "".join(["|" + fit(str(item[1] if item[1] else "")) for item in row]) + "|"
+
+            # print(rpadding, data, cpadding, sep="\n")
+
+        rpadding = embrace(2 * padding("-", 0), "+", "") * self.size + "+"
+
+        # print(rpadding)
+        for i in range(1, self.size + 1):
+            show(list(filter(lambda item: item[0][1] == i, atomic)), (i - 1))
+
+            # print(rpadding)
+        return output
+
+
+def benchmark(kenken, algorithm):
+    """
+    Used in order to benchmark the given algorithm in terms of
+      * The number of nodes it visits
+      * The number of constraint checks it performs
+      * The number of assignments it performs
+      * The completion time
+    """
+    kenken.checks = kenken.nassigns = 0
+
+    dt = time.time()
+
+    assignment = algorithm(kenken)
+
+    dt = time.time() - dt
+
+    return assignment, (kenken.checks, kenken.nassigns, dt)
+
+
+def gather(iterations, start_size, end_size, out):
+    """
+    Benchmark each one of the following algorithms for various kenken puzzles
+
+      * For every one of the following algorithms
+       * For every possible size of a kenken board
+         * Create 'iterations' random kenken puzzles of the current size
+           and evaluate the algorithm on each one of them in order to get
+           statistically sound data. Then calculate the average evaluation
+           of the algorithm for the current size.
+
+      * Save the results into a csv file
+    """
+    bt = lambda ken: csp.backtracking_search(ken)
+
+    fc = lambda ken: csp.backtracking_search(ken, inference=csp.forward_checking)
+
+    mac = lambda ken: csp.backtracking_search(ken, inference=csp.mac)
+
+    algorithms = {
+        "BT": bt,
+        "FC": fc,
+        "MAC": mac,
+
+    }
+
+    with open(out, "w+") as file:
+
+        out = writer(file)
+
+        out.writerow(
+            ["Algorithm  ", "Size  ", "Generation Number", "Constraint checks  ", "Assignments  ", "Completion time"])
+        counter = 0
+        for size in range(start_size, end_size + 1):
+            checks, assignments, dt = (0, 0, 0)
+            counter = 1
+            for iteration in range(1, iterations + 1):
+                size, cliques = generate(size)
+
+                for name, algorithm in algorithms.items():
+                    assignment, data = benchmark(Kenken(size, cliques), algorithm)
+
+                    print("algorithm =", name, "size =", size, "iteration =", iteration, "result =",
+                          "Success" if assignment else "Failure", file=stderr)
+
+                    checks = data[0]
+                    assignments = data[1]
+                    dt = data[2]
+
+                    out.writerow([str(name) + "          ", str(size) + "          ", str(counter) + "       ",
+                                  str(checks) + "          ", str(assignments) + "         ", str(dt) + "          "])
+                counter = counter + 1
+
+
+def kenken_input(board_size):
+    size, cliques = generate(board_size)
+    color = []
+    op = []
+    cara = ""
+    for items in cliques:
+        if items[1] == '.':
+            cara = ""
+        else:
+            cara = " " + items[1]
+        op.append("(" + str(items[2]) + cara + ")")
+        color.append(items[0])
+    ken = Kenken(size, cliques)
+    return ken, color, op
+
+
+def getAssignment(ken, algo):
+    if algo == "BT":
+        assignment = csp.backtracking_search(ken)
+    elif algo == "FC":
+        assignment = csp.backtracking_search(ken, inference=csp.forward_checking)
+    elif algo == "MAC":
+        assignment = csp.backtracking_search(ken, inference=csp.mac)
+    return ken, assignment
+
+
+def generate_board(board_size):
+    ken = Kenken(0, "")
+    ken, colorindex, op = kenken_input(board_size)
+    return colorindex, op, ken
+
+
+def solve(ken, algo):
+    ken, assignment = getAssignment(ken, algo)
+    output = ken.display(assignment)
+    start_size = 3
+    end_size = 4
+    gather(7, start_size, end_size, "out.csv")
+    return output
